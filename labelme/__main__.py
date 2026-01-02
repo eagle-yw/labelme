@@ -128,7 +128,7 @@ def main():
         dest="store_data",
         action="store_false",
         help="stop storing image data to JSON file",
-        default=argparse.SUPPRESS,
+        default=False,
     )
     parser.add_argument(
         "--autosave",

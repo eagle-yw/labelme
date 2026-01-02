@@ -31,7 +31,7 @@ CURSOR_DRAW = Qt.CrossCursor
 CURSOR_MOVE = Qt.ClosedHandCursor
 CURSOR_GRAB = Qt.OpenHandCursor
 
-MOVE_SPEED = 5.0
+MOVE_SPEED = 1
 
 
 class CanvasMode(enum.Enum):
@@ -750,6 +750,7 @@ class Canvas(QtWidgets.QWidget):
 
     def boundedMoveShapes(self, shapes, pos):
         if self.outOfPixmap(pos):
+            print("Out of pixmap, x {}, y {}", pos.x(), pos.y())
             return False  # No need to move
         o1 = pos + self.offsets[0]
         if self.outOfPixmap(o1):
@@ -771,6 +772,8 @@ class Canvas(QtWidgets.QWidget):
                 shape.moveBy(dp)
             self.prevPoint = pos
             return True
+        
+        print("Out of pixmap2, x {}, y {}", pos.x(), pos.y())
         return False
 
     def deSelectShape(self):
@@ -1023,6 +1026,49 @@ class Canvas(QtWidgets.QWidget):
     def keyPressEvent(self, a0: QtGui.QKeyEvent) -> None:
         modifiers = a0.modifiers()
         key = a0.key()
+        if self.editing():
+            if key == QtCore.Qt.Key_Q or key == QtCore.Qt.Key_E:
+                # 如果当前没有任何框，直接忽略
+                if not self.shapes:
+                    return
+                # self.setEditing(True)
+                # A. 找到当前选中的索引
+                current_index = -1
+                if self.selectedShapes and self.selectedShapes[0] in self.shapes:
+                    current_index = self.shapes.index(self.selectedShapes[0])
+                
+                # B. 计算下一个索引
+                next_index = 0
+                if key == QtCore.Qt.Key_Q:
+                    # Q键：切上一个 (减法取模会自动处理负数，比如 -1 % 5 = 4)
+                    next_index = (current_index - 1) % len(self.shapes)
+                elif key == QtCore.Qt.Key_E:
+                    # E键：切下一个
+                    next_index = (current_index + 1) % len(self.shapes)
+                
+                # C. 更新选中状态
+                
+                for shape in self.selectedShapes:
+                    shape.selected = False  # 取消当前选中状态
+                
+                
+                new_shape = self.shapes[next_index]
+                self.selectedShapes = [new_shape]
+                self.hShape = new_shape
+                self.prevPoint = new_shape.boundingRect().center()
+                self.selectShapePoint(self.prevPoint, multiple_selection_mode=False)
+                
+                # D. 发送信号通知主界面刷新列表 & 重绘
+                self.selectionChanged.emit(self.selectedShapes)
+                self.repaint()
+                
+                self.centerOnShape(new_shape)
+
+                # E. 标记事件已处理，防止传递给父控件
+                a0.accept()
+                self._update_status()
+                return
+                
         if self.drawing():
             if key == Qt.Key_Escape and self.current:
                 self.current = None
@@ -1036,6 +1082,40 @@ class Canvas(QtWidgets.QWidget):
             elif modifiers == Qt.AltModifier:
                 self.snapping = False
         elif self.editing():
+            if len(self.selectedShapes) < 1:
+                return
+            
+            self.hShape = self.selectedShapes[0]
+            dx, dy = 0.0, 0.0
+            if modifiers & QtCore.Qt.ControlModifier or modifiers & QtCore.Qt.AltModifier:
+                if modifiers & QtCore.Qt.ControlModifier:
+                    self.hVertex = 0
+                elif modifiers & QtCore.Qt.AltModifier:
+                    self.hVertex = 1
+
+                if key == QtCore.Qt.Key_Left:
+                    dx = -MOVE_SPEED  
+                elif key == QtCore.Qt.Key_Right:
+                    dx = MOVE_SPEED                  
+                elif key == QtCore.Qt.Key_Up:
+                    dy = -MOVE_SPEED  
+                elif key == QtCore.Qt.Key_Down:
+                    dy = MOVE_SPEED
+            
+
+                if(self.hVertex is not None):
+                    curr_pt = self.hShape.points[self.hVertex]
+                    new_pos = QtCore.QPointF(curr_pt.x() + dx, curr_pt.y() + dy)
+                    self.boundedMoveVertex(new_pos)
+                    self.repaint()
+                    self.movingShape = True
+                    self._update_status()
+                    
+                    self.hVertex = None
+                    self.hShape = None
+                    
+                    return 
+            
             if key == Qt.Key_Up:
                 self.moveByKeyboard(QPointF(0.0, -MOVE_SPEED))
             elif key == Qt.Key_Down:
@@ -1142,6 +1222,59 @@ class Canvas(QtWidgets.QWidget):
         self.prevhEdge = None
         self.update()
 
+    def centerOnShape(self, shape):
+        """
+        计算形状中心，并移动滚动条使视图居中
+        """
+        if not shape.points:
+            return
+
+        # 1. 计算形状的中心点 (图片坐标系)
+        # points 可能是 list 也可能是 QPointF，统一处理
+        xs = []
+        ys = []
+        for pt in shape.points:
+            try:
+                xs.append(pt.x())
+                ys.append(pt.y())
+            except AttributeError:
+                xs.append(pt[0])
+                ys.append(pt[1])
+        
+        center_x = sum(xs) / len(xs)
+        center_y = sum(ys) / len(ys)
+
+        # 2. 向上查找 QScrollArea
+        # Canvas 通常被包裹在 QScrollArea 里
+        parent = self.parent()
+        scroll_area = None
+        while parent:
+            if isinstance(parent, QtWidgets.QScrollArea):
+                scroll_area = parent
+                break
+            parent = parent.parent()
+        
+        if not scroll_area:
+            return
+
+        # 3. 计算目标滚动位置
+        # 公式：目标滚动值 = (图片中心 * 缩放) - (视口一半宽高)
+        
+        # 获取当前视口(可见区域)的大小
+        viewport_w = scroll_area.viewport().width()
+        viewport_h = scroll_area.viewport().height()
+
+        # 计算在 Canvas 控件上的绝对像素位置
+        canvas_x = center_x * self.scale
+        canvas_y = center_y * self.scale
+
+        # 计算让该点居中所需的 ScrollBar 值
+        target_scroll_x = int(canvas_x - (viewport_w / 2))
+        target_scroll_y = int(canvas_y - (viewport_h / 2))
+
+        # 4. 设置滚动条
+        scroll_area.horizontalScrollBar().setValue(target_scroll_x)
+        scroll_area.verticalScrollBar().setValue(target_scroll_y)
 
 def _update_shape_with_sam(
     sam: osam.types.Model,
